@@ -18,8 +18,7 @@ package zio.http.internal.middlewares
 
 import zio.test.Assertion._
 import zio.test._
-import zio.{ZIO, ZLayer}
-
+import zio.{Ref, ZIO, ZLayer}
 import zio.http._
 import zio.http.internal.HttpAppTestExtensions
 
@@ -211,9 +210,26 @@ object AuthSpec extends ZIOSpecDefault with HttpAppTestExtensions {
           r6body == "base user_auth",
         )
       }.provide(ZLayer.succeed(BaseService("base")), ZLayer.succeed(UserService("user"))),
+      test("Contextual auth evaluation per http app") {
+        def auth  = RequestHandlerMiddlewares.customAuthProvidingZIO[Any, CounterService, Throwable, AuthContext](
+          _ => for {
+            counter <- ZIO.service[CounterService].map(_.counter)
+            _ <- counter.update(_ + 1)
+            value <- counter.get
+          } yield Some(AuthContext(value.toString))
+        )
+        def httpEndpoint(str: String) = Http.collect[Request] {
+          case Method.GET -> !! / str => Response.ok
+        }
+        val httpApi = (httpEndpoint("x") ++ httpEndpoint("y")) @@ auth
+        for {
+          r1 <- httpApi.runZIO(Request.get(URL(!! / "x")))
+          counter <- ZIO.service[CounterService].flatMap(_.counter.get)
+        } yield assertTrue(r1.status == Status.Ok, counter == 1)
+      }.provide(ZLayer.fromZIO(Ref.make(0).map(CounterService.apply)))
     ),
   )
-
+  final case class CounterService(counter: Ref[Int])
   final case class UserService(prefix: String)
   final case class BaseService(value: String)
   final case class AuthContext(value: String)
